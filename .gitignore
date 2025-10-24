@@ -1,0 +1,4 @@
+/target
+.env
+template.yaml
+deploy.sh
