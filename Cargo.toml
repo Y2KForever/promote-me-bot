@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
-rss = "2.0.7"
 oauth2 = "4.4.2"
 url = "2.5.2"
 axum = "0.7.5"
@@ -44,3 +43,4 @@ atrium-api = { version = "0.25.6" }
 futures-util = "0.3.30"
 aws-lc-rs = "1.14.1"
 rustls = "0.23.34"
+feed-rs = { version = "2.3.1", features = ["sanitize"]}

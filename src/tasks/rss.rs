@@ -1,12 +1,13 @@
 use crate::tasks::TaskContext;
 use crate::{models, models::RssRegistration};
+use feed_rs::parser as FeedParser;
 use serenity::builder::CreateMessage;
 use serenity::model::id::ChannelId;
 use std::sync::Arc;
 use std::time::Duration;
 
 pub async fn run_rss_poll_loop(ctx: Arc<TaskContext>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    let mut interval = tokio::time::interval(Duration::from_secs(15 * 60));
 
     loop {
         interval.tick().await;
@@ -49,37 +50,47 @@ async fn check_feed(ctx: &Arc<TaskContext>, reg: &RssRegistration) -> anyhow::Re
         .await?
         .bytes()
         .await?;
-    let channel = rss::Channel::read_from(&content[..])?;
 
-    let latest_item = match channel.items.first() {
-        Some(item) => item,
+    let feed = FeedParser::parse(std::io::Cursor::new(content))?;
+
+    let latest_entry = match feed.entries.first() {
+        Some(entry) => entry,
         None => return Ok(()),
     };
 
-    let latest_guid = latest_item.guid.as_ref().map_or_else(
-        || latest_item.link.as_deref().unwrap_or_default(),
-        |guid| guid.value.as_str(),
-    );
+    let latest_id = &latest_entry.id;
+    let fallback_link = latest_entry.links.first().map_or("", |link| &link.href);
+    let latest_guid_or_link = if !latest_id.is_empty() {
+        latest_id.as_str()
+    } else {
+        fallback_link
+    };
 
-    let has_new_post = reg.last_post_guid.as_deref() != Some(latest_guid);
+    let has_new_post = reg.last_post_guid.as_deref() != Some(latest_guid_or_link);
 
-    if has_new_post && !latest_guid.is_empty() {
-        println!("New post found for {}: {}", reg.feed_url, latest_guid);
+    if has_new_post && !latest_guid_or_link.is_empty() {
+        println!(
+            "[RSS Task] New post found for {}: {}",
+            reg.feed_url, latest_guid_or_link
+        );
 
-        let title = latest_item.title.as_deref().unwrap_or("New Post");
-        let link = latest_item.link.as_deref().unwrap_or_default();
-        let message = format!("**New RSS Post:** {}\n{}", title, link);
+        let title = latest_entry
+            .title
+            .as_ref()
+            .map_or("New Post", |t| &t.content);
+        let link = latest_entry.links.first().map_or("", |l| &l.href);
+
+        let message = format!("**New RSS/Atom Post:** {}\n{}", title, link);
 
         let discord_channel = ChannelId::new(reg.channel_id);
         let builder = CreateMessage::new().content(message);
-
         discord_channel
             .send_message(ctx.http.as_ref(), builder)
             .await?;
 
-        let mut updated_reg = reg.clone();
-        updated_reg.last_post_guid = Some(latest_guid.to_string());
-        models::save_rss_registration(&ctx.app_state.db, updated_reg).await?;
+        let pk = reg.pk.clone();
+        let sk = reg.sk.clone();
+        models::update_rss_last_post_guid(&ctx.app_state.db, &pk, &sk, latest_guid_or_link).await?;
     }
 
     Ok(())
