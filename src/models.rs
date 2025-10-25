@@ -291,3 +291,20 @@ pub async fn get_server_config(
         None => Ok(None),
     }
 }
+
+pub async fn update_rss_last_post_guid(
+    db: &aws_sdk_dynamodb::Client,
+    pk: &str,
+    sk: &str,
+    last_post_guid: &str,
+) -> anyhow::Result<()> {
+    db.update_item()
+        .table_name(table_name())
+        .key("PK", AttributeValue::S(pk.to_string()))
+        .key("SK", AttributeValue::S(sk.to_string()))
+        .update_expression("SET last_post_guid = :guid")
+        .expression_attribute_values(":guid", AttributeValue::S(last_post_guid.to_string()))
+        .send()
+        .await?;
+    Ok(())
+}
