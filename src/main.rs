@@ -8,6 +8,7 @@ use serenity::prelude::GatewayIntents;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
+use twilight_http::Client as TwilightClient;
 
 mod commands;
 mod models;
@@ -108,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
         twitch_event_sender: twitch_tx,
         active_bsky_dids: active_bsky_dids_set,
     });
+    let twilight_http_client = Arc::new(TwilightClient::new(discord_token.to_string()));
 
     let intents = GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES;
     let mut client = Client::builder(&discord_token, intents)
@@ -123,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
     let task_context = Arc::new(tasks::TaskContext {
         http: client.http.clone(),
         app_state: app_state.clone(),
+        client: twilight_http_client,
     });
 
     tokio::spawn(tasks::rss::run_rss_poll_loop(task_context.clone()));
