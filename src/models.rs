@@ -18,6 +18,24 @@ pub struct RssRegistration {
     pub item_type: String,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TikTokRegistration {
+    #[serde(rename = "PK")]
+    pub pk: String,
+    #[serde(rename = "SK")]
+    pub sk: String,
+    #[serde(rename = "GSI1PK", skip_serializing_if = "Option::is_none")]
+    pub gsi1pk: Option<String>,
+    #[serde(rename = "GSI1SK", skip_serializing_if = "Option::is_none")]
+    pub gsi1sk: Option<String>,
+    pub item_type: String,
+    pub tiktok_open_id: String,
+    pub tiktok_display_name: String,
+    pub discord_channel_id: u64,
+    pub access_token: String,
+    pub refresh_token: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TwitchRegistration {
     #[serde(rename = "PK")]
@@ -304,6 +322,19 @@ pub async fn update_rss_last_post_guid(
         .key("SK", AttributeValue::S(sk.to_string()))
         .update_expression("SET last_post_guid = :guid")
         .expression_attribute_values(":guid", AttributeValue::S(last_post_guid.to_string()))
+        .send()
+        .await?;
+    Ok(())
+}
+
+pub async fn save_tiktok_registration(
+    db: &aws_sdk_dynamodb::Client,
+    reg: TikTokRegistration,
+) -> anyhow::Result<()> {
+    let item = to_item(reg)?;
+    db.put_item()
+        .table_name(table_name())
+        .set_item(Some(item))
         .send()
         .await?;
     Ok(())

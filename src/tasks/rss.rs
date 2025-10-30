@@ -1,13 +1,19 @@
 use crate::tasks::TaskContext;
 use crate::{models, models::RssRegistration};
 use feed_rs::parser as FeedParser;
-use serenity::builder::CreateMessage;
-use serenity::model::id::ChannelId;
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
+use twilight_http::request::Request;
+use twilight_http::routing::Route;
+use twilight_model::channel::message::component::{
+    Container, MediaGallery, MediaGalleryItem, TextDisplay, UnfurledMediaItem,
+};
+use twilight_model::channel::message::{Component, MessageFlags};
+use twilight_model::channel::Message;
 
 pub async fn run_rss_poll_loop(ctx: Arc<TaskContext>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(15 * 60));
+    let mut interval = tokio::time::interval(Duration::from_secs(60 * 5));
 
     loop {
         interval.tick().await;
@@ -74,19 +80,128 @@ async fn check_feed(ctx: &Arc<TaskContext>, reg: &RssRegistration) -> anyhow::Re
             reg.feed_url, latest_guid_or_link
         );
 
-        let title = latest_entry
+        let title_content = latest_entry
+            .clone()
             .title
-            .as_ref()
-            .map_or("New Post", |t| &t.content);
+            .or(feed.title)
+            .map(|text_obj| text_obj.content)
+            .unwrap_or("New post".to_string());
+
         let link = latest_entry.links.first().map_or("", |l| &l.href);
 
-        let message = format!("**New RSS/Atom Post:** {}\n{}", title, link);
+        let mut is_video = false;
 
-        let discord_channel = ChannelId::new(reg.channel_id);
-        let builder = CreateMessage::new().content(message);
-        discord_channel
-            .send_message(ctx.http.as_ref(), builder)
-            .await?;
+        if let Some(media_content) = latest_entry.media.first().and_then(|m| m.content.first()) {
+            if let Some(content_type) = &media_content.content_type {
+                if content_type.essence().ty.as_ref() == "video" {
+                    is_video = true;
+                }
+            }
+        }
+        if !is_video {
+            if link.contains("youtube.com")
+                || link.contains("youtu.be")
+                || link.contains("vimeo.com")
+            {
+                is_video = true;
+            }
+        }
+
+        let channel_id = reg.channel_id;
+        let route = Route::CreateMessage { channel_id };
+        let body_bytes: Vec<u8>;
+
+        if is_video {
+            println!(
+                "[RSS Task] Video detected. Sending simple message for: {}",
+                link
+            );
+
+            let message = format!("**New RSS/Atom Post:** {}\n{}", title_content, link);
+
+            let body = json!({
+                "content": message
+            });
+
+            body_bytes = serde_json::to_vec(&body)?;
+        } else {
+            println!("[RSS Task] No video. Sending v2 component for: {}", link);
+
+            let post_timestamp = &latest_entry.updated.map(|dt| dt.timestamp()).unwrap();
+            let title = format!("### ** [{}]({})**", title_content, link);
+
+            let title_text = Component::TextDisplay(TextDisplay {
+                content: title,
+                id: None,
+            });
+
+            let thumbnail_uri_option = latest_entry
+                .media
+                .first()
+                .and_then(|media| media.thumbnails.first())
+                .map(|thumbnail| &thumbnail.image.uri);
+
+            let media_content = if let Some(media) = thumbnail_uri_option {
+                let item = MediaGalleryItem {
+                    description: None,
+                    spoiler: Some(false),
+                    media: UnfurledMediaItem {
+                        url: media.to_string(),
+                        proxy_url: None,
+                        height: None,
+                        width: None,
+                        content_type: None,
+                    },
+                };
+
+                Some(Component::MediaGallery(MediaGallery {
+                    id: None,
+                    items: vec![item],
+                }))
+            } else {
+                None
+            };
+
+            let mut main_content = vec![title_text];
+
+            if let Some(media) = media_content {
+                main_content.push(media)
+            };
+
+            let footer_text = Component::TextDisplay(TextDisplay {
+                content: format!(
+                    "-# <:rss:1431781137545429043> RSS / Atom • <t:{}:f>",
+                    post_timestamp
+                ),
+                id: None,
+            });
+
+            main_content.push(footer_text);
+
+            let container = Component::Container(Container {
+                id: None,
+                accent_color: Some(None),
+                components: main_content,
+                spoiler: Some(false),
+            });
+
+            let body = json!({
+                "components": vec![container],
+                "flags": MessageFlags::IS_COMPONENTS_V2.bits()
+            });
+
+            body_bytes = serde_json::to_vec(&body)?;
+        }
+
+        let request = Request::builder(&route).body(body_bytes).build()?;
+
+        if let Err(e) = ctx.client.request::<Message>(request).await {
+            println!(
+                "[RSS Task] Failed Discord send (Raw) for {}: {}",
+                reg.feed_url, e
+            );
+            return Err(e.into());
+        }
 
         let pk = reg.pk.clone();
         let sk = reg.sk.clone();
