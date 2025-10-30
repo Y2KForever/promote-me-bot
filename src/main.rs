@@ -1,5 +1,6 @@
 use dotenvy_macro::dotenv;
 use rustls::crypto;
+use serenity::all::ActivityData;
 use serenity::async_trait;
 use serenity::client::{Client, Context, EventHandler};
 use serenity::model::application::Interaction;
@@ -111,9 +112,11 @@ async fn main() -> anyhow::Result<()> {
     });
     let twilight_http_client = Arc::new(TwilightClient::new(discord_token.to_string()));
 
-    let intents = GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES;
+    let intents =
+        GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::GUILD_PRESENCES;
     let mut client = Client::builder(&discord_token, intents)
         .event_handler(Handler)
+        .activity(ActivityData::custom("Watching F1 fanfic smut 🏎️💨"))
         .await
         .expect("Error creating Serenity client");
 
