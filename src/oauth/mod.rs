@@ -1,18 +1,20 @@
 use axum::{
     body::Bytes,
     extract::{Query, State},
-    http::HeaderMap,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Router,
 };
 use dotenvy_macro::dotenv;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use std::sync::Arc;
+use std::{collections::HashMap, net::SocketAddr};
 
-use crate::{models, AppState, TwitchEventInfo};
+use crate::{
+    models::{self, TikTokRegistration, TwitchRegistration},
+    AppState, TwitchEventInfo,
+};
 use reqwest::Client as ReqwestClient;
 use serenity::http::Http;
 use serenity::model::id::ChannelId;
@@ -65,6 +67,44 @@ struct TwitchWebhookPayload {
     event: Option<TwitchEventInfo>,
 }
 
+#[allow(dead_code)]
+#[derive(Deserialize, Debug)]
+pub struct TikTokTokenResponse {
+    pub access_token: String,
+    pub expires_in: i64,
+    pub open_id: String,
+    pub refresh_token: String,
+    pub refresh_expires_in: i64,
+    pub scope: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+pub struct TikTokUser {
+    pub open_id: String,
+    pub union_id: String,
+    pub display_name: String,
+    pub username: String,
+    pub avatar_url: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct TikTokUserData {
+    pub user: TikTokUser,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct TikTokError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct TikTokUserResponse {
+    pub data: TikTokUserData,
+    pub error: TikTokError,
+}
+
 #[derive(Clone)]
 pub struct WebServerState {
     pub app_state: Arc<AppState>,
@@ -76,6 +116,7 @@ pub async fn start_server(state: WebServerState, port: u16) {
 
     let app = Router::new()
         .route("/auth/twitch/callback", get(twitch_callback))
+        .route("/auth/tiktok/callback", get(tiktok_callback))
         .route("/webhook/twitch", post(twitch_webhook_receiver))
         .with_state(state);
 
@@ -149,7 +190,7 @@ async fn twitch_callback(
             }
         };
 
-    let reg = models::TwitchRegistration {
+    let reg = TwitchRegistration {
         pk: format!("GUILD#{}", guild_id),
         sk: format!("TWITCH#{}", user_data.id),
         gsi1pk: Some("TWITCH_LOOKUP".to_string()),
@@ -401,4 +442,224 @@ fn verify_twitch_signature(headers: &HeaderMap, body: &Bytes, secret: &str) -> b
     mac.update(&message);
 
     mac.verify_slice(&expected_hash).is_ok()
+}
+
+async fn exchange_tiktok_code(
+    http: &reqwest::Client,
+    code: String,
+) -> anyhow::Result<TikTokTokenResponse> {
+    let client_key = dotenv!("TIKTOK_CLIENT_KEY");
+    let client_secret = dotenv!("TIKTOK_CLIENT_SECRET");
+    let base_url = dotenv!("BASE_URL");
+    let redirect_uri = format!("{}/auth/tiktok/callback", base_url);
+
+    let token_url = "https://open.tiktokapis.com/v2/oauth/token/";
+
+    let mut params = HashMap::new();
+    params.insert("client_key", client_key);
+    params.insert("client_secret", client_secret);
+    params.insert("code", &code);
+    params.insert("grant_type", "authorization_code");
+    params.insert("redirect_uri", &redirect_uri);
+
+    let resp = http.post(token_url).form(&params).send().await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let error_text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(anyhow::anyhow!("TikTok Token API Error ({}): {}", status, error_text).into());
+    }
+
+    let token_response = resp.json::<TikTokTokenResponse>().await?;
+    Ok(token_response)
+}
+
+async fn get_tiktok_user(http: &reqwest::Client, access_token: &str) -> anyhow::Result<TikTokUser> {
+    let user_info_url = "https://open.tiktokapis.com/v2/user/info/";
+
+    let fields = "open_id,union_id,display_name,avatar_url,username";
+
+    let resp = http
+        .get(user_info_url)
+        .bearer_auth(access_token)
+        .query(&[("fields", fields)])
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let error_text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(
+            anyhow::anyhow!("TikTok User Info API Error ({}): {}", status, error_text).into(),
+        );
+    }
+
+    let user_response = resp.json::<TikTokUserResponse>().await?;
+
+    if user_response.error.code != "ok" {
+        return Err(anyhow::anyhow!(
+            "TikTok User Info API Logic Error: {}",
+            user_response.error.message
+        )
+        .into());
+    }
+
+    Ok(user_response.data.user)
+}
+
+async fn tiktok_callback(
+    Query(query): Query<CallbackQuery>,
+    State(state): State<WebServerState>,
+) -> impl IntoResponse {
+    let parts: Vec<&str> = query.state.split('_').collect();
+    if parts.len() != 2 {
+        return (StatusCode::BAD_REQUEST, "Invalid state").into_response();
+    }
+
+    let guild_id: u64 = match parts[1].parse() {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid Guild ID in state").into_response(),
+    };
+
+    let target_channel_id = match models::get_server_config(&state.app_state.db, guild_id).await {
+        Ok(Some(config)) => config.notification_channel_id,
+        Ok(None) => {
+            return (StatusCode::OK, "Registration failed: Server notification channel not configured. Ask an admin to run /config channel.").into_response();
+        }
+        Err(e) => {
+            println!("DB lookup error for Guild {}: {}", guild_id, e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error during channel lookup",
+            )
+                .into_response();
+        }
+    };
+    let channel = ChannelId::new(target_channel_id);
+
+    let token_response: TikTokTokenResponse =
+        match exchange_tiktok_code(&state.app_state.http, query.code).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                println!("TikTok code exchange error: {}", e);
+                let _ = channel
+                    .send_message(
+                        state.discord_http.as_ref(),
+                        CreateMessage::new().content("Error: Failed to exchange TikTok token."),
+                    )
+                    .await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to exchange token",
+                )
+                    .into_response();
+            }
+        };
+
+    let user_data: TikTokUser =
+        match get_tiktok_user(&state.app_state.http, &token_response.access_token).await {
+            Ok(user) => user,
+            Err(e) => {
+                println!("TikTok get user error: {}", e);
+                let _ = channel
+                    .send_message(
+                        state.discord_http.as_ref(),
+                        CreateMessage::new().content("Error: Failed to get TikTok user data."),
+                    )
+                    .await;
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to get user data")
+                    .into_response();
+            }
+        };
+
+    let reg = TikTokRegistration {
+        pk: format!("GUILD#{}", guild_id),
+        sk: format!("TIKTOK#{}", user_data.open_id),
+        gsi1pk: Some("TIKTOK_LOOKUP".to_string()),
+        gsi1sk: Some(format!("NAME#{}", user_data.username.to_lowercase())),
+        item_type: "TIKTOK_REG".to_string(),
+        tiktok_open_id: user_data.open_id.clone(),
+        tiktok_display_name: user_data.display_name.clone(),
+        tiktok_username: user_data.username.clone(),
+        channel_id: target_channel_id,
+        access_token: token_response.access_token,
+        refresh_token: token_response.refresh_token,
+        last_post_guid: None,
+    };
+
+    match models::save_tiktok_registration(&state.app_state.db, reg).await {
+        Ok(_) => {
+            println!(
+                "Successfully registered TikTok user: {}",
+                user_data.display_name
+            );
+
+            let success_msg = format!(
+                "✅ Successfully registered TikTok account: `{}`. Updates will post to <#{}>.",
+                user_data.display_name, target_channel_id
+            );
+            let builder = CreateMessage::new().content(success_msg);
+            if let Err(e) = channel
+                .send_message(state.discord_http.as_ref(), builder)
+                .await
+            {
+                println!("Failed to send Discord success message: {}", e);
+            }
+            (StatusCode::OK, "Success! You can close this window.").into_response()
+        }
+        Err(e) => {
+            println!("DB save error: {}", e);
+            let _ = channel
+                .send_message(
+                    state.discord_http.as_ref(),
+                    CreateMessage::new().content("Error: Failed to save registration to database."),
+                )
+                .await;
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Error: Failed to save registration.",
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn refresh_tiktok_token(
+    http: &reqwest::Client,
+    refresh_token: String,
+) -> anyhow::Result<TikTokTokenResponse> {
+    // Assuming TikTokTokenResponse is your struct
+    let client_key = dotenv!("TIKTOK_CLIENT_KEY");
+    let client_secret = dotenv!("TIKTOK_CLIENT_SECRET");
+    let token_url = "https://open.tiktokapis.com/v2/oauth/token/";
+
+    let mut params = HashMap::new();
+    params.insert("client_key", client_key.to_string());
+    params.insert("client_secret", client_secret.to_string());
+    params.insert("grant_type", "refresh_token".to_string());
+    params.insert("refresh_token", refresh_token);
+
+    let resp = http.post(token_url).form(&params).send().await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let error_text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(anyhow::anyhow!(
+            "TikTok Token Refresh API Error ({}): {}",
+            status,
+            error_text
+        ));
+    }
+
+    let token_response = resp.json::<TikTokTokenResponse>().await?;
+    Ok(token_response)
 }

@@ -1,5 +1,6 @@
 use dotenvy_macro::dotenv;
 use rustls::crypto;
+use serde::Deserialize;
 use serenity::all::ActivityData;
 use serenity::async_trait;
 use serenity::client::{Client, Context, EventHandler};
@@ -16,7 +17,7 @@ mod models;
 mod oauth;
 mod tasks;
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TwitchEventInfo {
     pub broadcaster_user_id: String,
     pub broadcaster_user_login: String,
@@ -132,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     tokio::spawn(tasks::rss::run_rss_poll_loop(task_context.clone()));
+    tokio::spawn(tasks::tiktok::run_tiktok_poll_loop(task_context.clone()));
     tokio::spawn(tasks::bluesky::run_bluesky_firehose_loop(
         task_context.clone(),
     ));

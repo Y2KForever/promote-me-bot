@@ -1,12 +1,12 @@
 use crate::models::{BlueskyRegistration, RssRegistration};
 use crate::{models, AppState};
+use dotenvy_macro::dotenv;
 use serde::Deserialize;
 use serenity::all::{
     CommandDataOption, CommandDataOptionValue, CommandInteraction, CreateInteractionResponse,
     CreateInteractionResponseMessage, Permissions,
 };
 use serenity::client::Context;
-use std::env;
 use std::sync::Arc;
 
 #[derive(Deserialize)]
@@ -58,6 +58,7 @@ pub async fn run(
         "rss" => handle_rss(ctx, command, app_state, options_slice).await?,
         "twitch" => handle_twitch(ctx, command).await?,
         "bluesky" => handle_bluesky(ctx, command, app_state, options_slice).await?,
+        "tiktok" => handle_tiktok(ctx, command).await?,
         _ => {
             let response = CreateInteractionResponseMessage::new()
                 .content("Unknown subcommand used for /register.")
@@ -142,8 +143,8 @@ async fn handle_rss(
 }
 
 async fn handle_twitch(ctx: &Context, command: &CommandInteraction) -> anyhow::Result<()> {
-    let base_url = env::var("BASE_URL")?;
-    let client_id = env::var("TWITCH_CLIENT_ID")?;
+    let base_url = dotenv!("BASE_URL");
+    let client_id = dotenv!("TWITCH_CLIENT_ID");
 
     let guild_id = command.guild_id.expect("Command must be run in a guild.");
     let state = format!("{}_{}", command.user.id.get(), guild_id.get());
@@ -267,6 +268,36 @@ async fn handle_bluesky(
         .ephemeral(true);
     command
         .create_response(&ctx.http, CreateInteractionResponse::Message(conf_resp))
+        .await?;
+    Ok(())
+}
+
+async fn handle_tiktok(ctx: &Context, command: &CommandInteraction) -> anyhow::Result<()> {
+    let client_key = dotenv!("TIKTOK_CLIENT_KEY");
+    let base_url = dotenv!("BASE_URL");
+    let redirect_uri = format!("{}/auth/tiktok/callback", base_url);
+
+    let guild_id = command.guild_id.expect("Command must be run in a guild.");
+    let state = format!("{}_{}", command.user.id.get(), guild_id.get());
+
+    let scope = "user.info.basic,user.info.profile,video.list";
+    let auth_url = format!(
+        "https://www.tiktok.com/v2/auth/authorize/?client_key={}&scope={}&response_type=code&redirect_uri={}&state={}&disable_auto_auth=1",
+        client_key,
+        scope,
+        redirect_uri,
+        state
+    );
+
+    let response = CreateInteractionResponseMessage::new()
+        .content(format!(
+            "Please authorize with TikTok to register your account:\n\n[Click here to authorize]({})",
+            auth_url
+        ))
+        .ephemeral(true);
+
+    command
+        .create_response(&ctx.http, CreateInteractionResponse::Message(response))
         .await?;
     Ok(())
 }
