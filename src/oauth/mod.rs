@@ -15,7 +15,7 @@ use crate::{
     models::{self, TikTokRegistration, TwitchRegistration},
     AppState, TwitchEventInfo,
 };
-use reqwest::Client as ReqwestClient;
+use reqwest::{header, Client as ReqwestClient};
 use serenity::http::Http;
 use serenity::model::id::ChannelId;
 
@@ -38,10 +38,10 @@ struct TwitchTokenResponse {
 
 #[allow(dead_code)]
 #[derive(Deserialize, Debug)]
-struct TwitchUser {
-    id: String,
-    login: String,
-    display_name: String,
+pub struct TwitchUser {
+    pub id: String,
+    pub login: String,
+    pub display_name: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -109,6 +109,11 @@ pub struct TikTokUserResponse {
 pub struct WebServerState {
     pub app_state: Arc<AppState>,
     pub discord_http: Arc<Http>,
+}
+
+#[derive(Deserialize)]
+struct TwitchAppToken {
+    access_token: String,
 }
 
 pub async fn start_server(state: WebServerState, port: u16) {
@@ -442,6 +447,60 @@ fn verify_twitch_signature(headers: &HeaderMap, body: &Bytes, secret: &str) -> b
     mac.update(&message);
 
     mac.verify_slice(&expected_hash).is_ok()
+}
+
+async fn get_twitch_app_token(app_state: &Arc<AppState>) -> anyhow::Result<String> {
+    let client_id = dotenv!("TWITCH_CLIENT_ID");
+    let client_secret = dotenv!("TWITCH_CLIENT_SECRET");
+    let url = "https://id.twitch.tv/oauth2/token";
+
+    let params = [
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+        ("grant_type", "client_credentials"),
+    ];
+
+    let response = app_state.http.post(url).form(&params).send().await?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Failed to get Twitch app token: {} - {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        ));
+    }
+
+    let token_response: TwitchAppToken = response.json().await?;
+    Ok(token_response.access_token)
+}
+
+pub async fn get_twitch_user_by_login(
+    app_state: &Arc<AppState>,
+    username: &str,
+) -> anyhow::Result<Option<TwitchUser>> {
+    let app_token = get_twitch_app_token(app_state).await?;
+    let client_id = dotenv!("TWITCH_CLIENT_ID");
+
+    let url = format!("https://api.twitch.tv/helix/users?login={}", username);
+
+    let response = app_state
+        .http
+        .get(&url)
+        .header(header::AUTHORIZATION, format!("Bearer {}", app_token))
+        .header("Client-Id", client_id)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Failed to get Twitch user: {} - {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        ));
+    }
+
+    let user_response: TwitchUsersResponse = response.json().await?;
+    Ok(user_response.data.into_iter().next())
 }
 
 async fn exchange_tiktok_code(
