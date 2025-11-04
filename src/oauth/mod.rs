@@ -1,8 +1,7 @@
 use axum::{
     body::Bytes,
     extract::{Query, State},
-    http::HeaderMap,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Router,
@@ -85,6 +84,7 @@ pub struct TikTokUser {
     pub open_id: String,
     pub union_id: String,
     pub display_name: String,
+    pub username: String,
     pub avatar_url: String,
 }
 
@@ -480,7 +480,7 @@ async fn exchange_tiktok_code(
 async fn get_tiktok_user(http: &reqwest::Client, access_token: &str) -> anyhow::Result<TikTokUser> {
     let user_info_url = "https://open.tiktokapis.com/v2/user/info/";
 
-    let fields = "open_id,union_id,display_name,avatar_url";
+    let fields = "open_id,union_id,display_name,avatar_url,username";
 
     let resp = http
         .get(user_info_url)
@@ -582,13 +582,15 @@ async fn tiktok_callback(
         pk: format!("GUILD#{}", guild_id),
         sk: format!("TIKTOK#{}", user_data.open_id),
         gsi1pk: Some("TIKTOK_LOOKUP".to_string()),
-        gsi1sk: Some(format!("NAME#{}", user_data.display_name.to_lowercase())),
+        gsi1sk: Some(format!("NAME#{}", user_data.username.to_lowercase())),
         item_type: "TIKTOK_REG".to_string(),
         tiktok_open_id: user_data.open_id.clone(),
         tiktok_display_name: user_data.display_name.clone(),
-        discord_channel_id: target_channel_id,
+        tiktok_username: user_data.username.clone(),
+        channel_id: target_channel_id,
         access_token: token_response.access_token,
         refresh_token: token_response.refresh_token,
+        last_post_guid: None,
     };
 
     match models::save_tiktok_registration(&state.app_state.db, reg).await {
@@ -626,4 +628,38 @@ async fn tiktok_callback(
                 .into_response()
         }
     }
+}
+
+pub async fn refresh_tiktok_token(
+    http: &reqwest::Client,
+    refresh_token: String,
+) -> anyhow::Result<TikTokTokenResponse> {
+    // Assuming TikTokTokenResponse is your struct
+    let client_key = dotenv!("TIKTOK_CLIENT_KEY");
+    let client_secret = dotenv!("TIKTOK_CLIENT_SECRET");
+    let token_url = "https://open.tiktokapis.com/v2/oauth/token/";
+
+    let mut params = HashMap::new();
+    params.insert("client_key", client_key.to_string());
+    params.insert("client_secret", client_secret.to_string());
+    params.insert("grant_type", "refresh_token".to_string());
+    params.insert("refresh_token", refresh_token);
+
+    let resp = http.post(token_url).form(&params).send().await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let error_text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(anyhow::anyhow!(
+            "TikTok Token Refresh API Error ({}): {}",
+            status,
+            error_text
+        ));
+    }
+
+    let token_response = resp.json::<TikTokTokenResponse>().await?;
+    Ok(token_response)
 }

@@ -6,6 +6,7 @@ use twilight_http::Client as TwilightClient;
 pub mod bluesky;
 pub mod rss;
 pub mod twitch;
+pub mod tiktok;
 
 pub struct TaskContext {
     pub http: Arc<Http>,

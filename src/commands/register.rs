@@ -280,9 +280,9 @@ async fn handle_tiktok(ctx: &Context, command: &CommandInteraction) -> anyhow::R
     let guild_id = command.guild_id.expect("Command must be run in a guild.");
     let state = format!("{}_{}", command.user.id.get(), guild_id.get());
 
-    let scope = "user.info.basic";
+    let scope = "user.info.basic,user.info.profile,video.list";
     let auth_url = format!(
-        "https://www.tiktok.com/v2/auth/authorize/?client_key={}&scope={}&response_type=code&redirect_uri={}&state={}",
+        "https://www.tiktok.com/v2/auth/authorize/?client_key={}&scope={}&response_type=code&redirect_uri={}&state={}&disable_auto_auth=1",
         client_key,
         scope,
         redirect_uri,

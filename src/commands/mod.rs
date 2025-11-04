@@ -122,6 +122,21 @@ pub async fn register_commands(http: &Http) -> anyhow::Result<()> {
                     )
                     .required(true),
                 ),
+            )
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::SubCommand,
+                    "tiktok",
+                    "Remove a registered TikTok user",
+                )
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "login",
+                        "The TikTok login/username to remove (e.g., ninja)",
+                    )
+                    .required(true),
+                ),
             ),
     )
     .await?;

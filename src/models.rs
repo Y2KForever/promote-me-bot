@@ -31,9 +31,11 @@ pub struct TikTokRegistration {
     pub item_type: String,
     pub tiktok_open_id: String,
     pub tiktok_display_name: String,
-    pub discord_channel_id: u64,
+    pub tiktok_username: String,
+    pub channel_id: u64,
     pub access_token: String,
     pub refresh_token: String,
+    pub last_post_guid: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -95,9 +97,10 @@ pub async fn get_all_rss_registrations(
     db: &aws_sdk_dynamodb::Client,
 ) -> anyhow::Result<Vec<RssRegistration>> {
     let output = db
-        .scan()
+        .query()
         .table_name(table_name())
-        .filter_expression("item_type = :rss")
+        .key_condition_expression("item_type = :rss")
+        .index_name("item_type-index")
         .expression_attribute_values(":rss", AttributeValue::S("RSS_FEED".to_string()))
         .send()
         .await?;
@@ -338,4 +341,89 @@ pub async fn save_tiktok_registration(
         .send()
         .await?;
     Ok(())
+}
+
+pub async fn update_tiktok_tokens(
+    db: &aws_sdk_dynamodb::Client,
+    pk: &str,
+    sk: &str,
+    access_token: &str,
+    refresh_token: &str,
+) -> anyhow::Result<()> {
+    db.update_item()
+        .table_name(table_name())
+        .key("PK", AttributeValue::S(pk.to_string()))
+        .key("SK", AttributeValue::S(sk.to_string()))
+        .update_expression("SET access_token = :access_token, refresh_token = :refresh_token")
+        .expression_attribute_values(":access_token", AttributeValue::S(access_token.to_string()))
+        .expression_attribute_values(
+            ":refresh_token",
+            AttributeValue::S(refresh_token.to_string()),
+        )
+        .send()
+        .await?;
+    Ok(())
+}
+
+pub async fn get_all_tiktok_registrations(
+    db: &aws_sdk_dynamodb::Client,
+) -> anyhow::Result<Vec<TikTokRegistration>> {
+    let output = db
+        .query()
+        .table_name(table_name())
+        .key_condition_expression("item_type = :tiktok")
+        .expression_attribute_values(":tiktok", AttributeValue::S("TIKTOK_REG".to_string()))
+        .index_name("item_type-index".to_string())
+        .send()
+        .await?;
+
+    let items = output.items.unwrap_or_default();
+
+    let regs = items
+        .into_iter()
+        .filter_map(|item| from_item(item).ok())
+        .collect();
+
+    Ok(regs)
+}
+
+pub async fn update_tiktok_last_post_id(
+    db: &aws_sdk_dynamodb::Client,
+    pk: &str,
+    sk: &str,
+    latest_id: &str,
+) -> anyhow::Result<()> {
+    db.update_item()
+        .table_name(table_name())
+        .key("PK", AttributeValue::S(pk.to_string()))
+        .key("SK", AttributeValue::S(sk.to_string()))
+        .update_expression("SET last_post_guid = :guid")
+        .expression_attribute_values(":guid", AttributeValue::S(latest_id.to_string()))
+        .send()
+        .await?;
+    Ok(())
+}
+
+pub async fn get_tiktok_reg_by_login(
+    db: &aws_sdk_dynamodb::Client,
+    tiktok_login: &str,
+) -> anyhow::Result<Option<TikTokRegistration>> {
+    let output = db
+        .query()
+        .table_name(table_name())
+        .index_name("GSI1")
+        .key_condition_expression("GSI1PK = :pk AND GSI1SK = :sk")
+        .expression_attribute_values(":pk", AttributeValue::S("TIKTOK_LOOKUP".to_string()))
+        .expression_attribute_values(
+            ":sk",
+            AttributeValue::S(format!("NAME#{}", tiktok_login.to_lowercase())),
+        )
+        .send()
+        .await?;
+
+    let item = output.items.unwrap_or_default().pop();
+    match item {
+        Some(item_map) => Ok(from_item(item_map).ok()),
+        None => Ok(None),
+    }
 }

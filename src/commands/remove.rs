@@ -1,3 +1,4 @@
+use crate::tasks::tiktok::revoke_tiktok_access;
 use crate::{models, AppState};
 use serenity::all::{
     CommandDataOption, CommandDataOptionValue, CommandInteraction, CreateInteractionResponse,
@@ -54,6 +55,7 @@ pub async fn run(
         "rss" => handle_rss_remove(ctx, command, app_state, options_slice).await?,
         "twitch" => handle_twitch_remove(ctx, command, app_state, options_slice).await?,
         "bluesky" => handle_bluesky_remove(ctx, command, app_state, options_slice).await?,
+        "tiktok" => handle_tiktok_remove(ctx, command, app_state, options_slice).await?,
         _ => {
             let response = CreateInteractionResponseMessage::new()
                 .content("Unknown subcommand used for /remove.")
@@ -260,6 +262,103 @@ pub async fn handle_bluesky_remove(
                 .content(format!(
                     "❌ Database error looking up Bluesky handle: `{}`.",
                     handle
+                ))
+                .ephemeral(true);
+            command
+                .create_response(&ctx.http, CreateInteractionResponse::Message(response))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn handle_tiktok_remove(
+    ctx: &Context,
+    command: &CommandInteraction,
+    app_state: Arc<AppState>,
+    options: &[CommandDataOption],
+) -> anyhow::Result<()> {
+    let required_permissions = Permissions::MANAGE_GUILD;
+    if let Some(member) = &command.member {
+        if !member
+            .permissions
+            .map_or(false, |p| p.contains(required_permissions))
+        {
+            let response = CreateInteractionResponseMessage::new()
+                .content("🚫 You must have the `Manage Server` permission to remove TikTok users.")
+                .ephemeral(true);
+            command
+                .create_response(&ctx.http, CreateInteractionResponse::Message(response))
+                .await?;
+            return Ok(());
+        }
+    } else {
+        let response = CreateInteractionResponseMessage::new()
+            .content("🚫 This command is restricted to server administrators.")
+            .ephemeral(true);
+        command
+            .create_response(&ctx.http, CreateInteractionResponse::Message(response))
+            .await?;
+        return Ok(());
+    }
+
+    let login_option = options
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Missing login option"))?;
+
+    let login = match &login_option.value {
+        CommandDataOptionValue::String(login_str) => login_str,
+        _ => return Err(anyhow::anyhow!("Invalid login value type")),
+    };
+
+    let reg_result = models::get_tiktok_reg_by_login(&app_state.db, login).await;
+
+    match reg_result {
+        Ok(Some(reg_item)) => {
+            match models::delete_registration(&app_state.db, &reg_item.pk, &reg_item.sk).await {
+                Ok(_) => {
+                    revoke_tiktok_access(&app_state, &reg_item.access_token).await?;
+                    let response = CreateInteractionResponseMessage::new()
+                        .content(format!("✅ Successfully removed Tiktok user: `{}`", login))
+                        .ephemeral(true);
+                    command
+                        .create_response(&ctx.http, CreateInteractionResponse::Message(response))
+                        .await?;
+                }
+                Err(e) => {
+                    println!(
+                        "Error deleting tiktok user (PK: {}, SK: {}): {:?}",
+                        reg_item.pk, reg_item.sk, e
+                    );
+                    let response = CreateInteractionResponseMessage::new()
+                        .content(format!(
+                            "❌ Error removing tiktok user: `{}`. Please try again.",
+                            login
+                        ))
+                        .ephemeral(true);
+                    command
+                        .create_response(&ctx.http, CreateInteractionResponse::Message(response))
+                        .await?;
+                }
+            }
+        }
+        Ok(None) => {
+            let response = CreateInteractionResponseMessage::new()
+                .content(format!(
+                    "❌ Error: Tiktok user `{}` not found in registration.",
+                    login
+                ))
+                .ephemeral(true);
+            command
+                .create_response(&ctx.http, CreateInteractionResponse::Message(response))
+                .await?;
+        }
+        Err(e) => {
+            println!("Error looking up Tiktok user '{}': {:?}", login, e);
+            let response = CreateInteractionResponseMessage::new()
+                .content(format!(
+                    "❌ Database error looking up Tiktok user: `{}`.",
+                    login
                 ))
                 .ephemeral(true);
             command
