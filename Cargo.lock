@@ -2037,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "promote-me"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "aws-config",
