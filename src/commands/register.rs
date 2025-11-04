@@ -1,4 +1,5 @@
 use crate::models::{BlueskyRegistration, RssRegistration};
+use crate::oauth::{get_twitch_user_by_login};
 use crate::{models, AppState};
 use dotenvy_macro::dotenv;
 use serde::Deserialize;
@@ -56,7 +57,7 @@ pub async fn run(
 
     match option.name.as_str() {
         "rss" => handle_rss(ctx, command, app_state, options_slice).await?,
-        "twitch" => handle_twitch(ctx, command).await?,
+        "twitch" => handle_twitch(ctx, command, app_state, options_slice).await?,
         "bluesky" => handle_bluesky(ctx, command, app_state, options_slice).await?,
         "tiktok" => handle_tiktok(ctx, command).await?,
         _ => {
@@ -142,30 +143,147 @@ async fn handle_rss(
     Ok(())
 }
 
-async fn handle_twitch(ctx: &Context, command: &CommandInteraction) -> anyhow::Result<()> {
-    let base_url = dotenv!("BASE_URL");
-    let client_id = dotenv!("TWITCH_CLIENT_ID");
+async fn handle_twitch(
+    ctx: &Context,
+    command: &CommandInteraction,
+    app_state: Arc<AppState>,
+    options: &[CommandDataOption],
+) -> anyhow::Result<()> {
+    let username_option = options.iter().find(|opt| opt.name == "username");
 
-    let guild_id = command.guild_id.expect("Command must be run in a guild.");
-    let state = format!("{}_{}", command.user.id.get(), guild_id.get());
+    if let Some(option) = username_option {
+        let required_permissions = Permissions::MANAGE_GUILD;
+        if let Some(member) = &command.member {
+            if !member
+                .permissions
+                .map_or(false, |p| p.contains(required_permissions))
+            {
+                let response = CreateInteractionResponseMessage::new()
+                    .content("🚫 You must have the `Manage Server` permission to register other Twitch users.")
+                    .ephemeral(true);
+                command
+                    .create_response(&ctx.http, CreateInteractionResponse::Message(response))
+                    .await?;
+                return Ok(());
+            }
+        } else {
+            let response = CreateInteractionResponseMessage::new()
+                .content("🚫 This command is restricted to server administrators.")
+                .ephemeral(true);
+            command
+                .create_response(&ctx.http, CreateInteractionResponse::Message(response))
+                .await?;
+            return Ok(());
+        }
 
-    let auth_url = format!(
-        "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri={}/auth/twitch/callback&response_type=code&scope=user:read:email&state={}&force_verify=true",
-        client_id,
-        base_url,
-        state
-    );
+        let Some(target_channel_id) =
+            resolve_notification_channel(ctx, command, &app_state).await?
+        else {
+            return Ok(());
+        };
 
-    let response = CreateInteractionResponseMessage::new()
-        .content(format!(
-            "Please authorize with Twitch to register your channel:\n\n[Click here to authorize]({})",
-            auth_url
-        ))
-        .ephemeral(true);
+        let username = match &option.value {
+            CommandDataOptionValue::String(s) => s.trim().to_lowercase(),
+            _ => return Err(anyhow::anyhow!("Invalid username value type")),
+        };
 
-    command
-        .create_response(&ctx.http, CreateInteractionResponse::Message(response))
-        .await?;
+        let user = match get_twitch_user_by_login(&app_state, &username).await {
+            Ok(Some(user)) => user,
+            Ok(None) => {
+                let response = CreateInteractionResponseMessage::new()
+                    .content(format!(
+                        "❌ Could not find a Twitch user with the username: `{}`",
+                        username
+                    ))
+                    .ephemeral(true);
+                command
+                    .create_response(&ctx.http, CreateInteractionResponse::Message(response))
+                    .await?;
+                return Ok(());
+            }
+            Err(e) => {
+                println!("Twitch API error: {:?}", e);
+                let response = CreateInteractionResponseMessage::new()
+                    .content(format!(
+                        "❌ An error occurred while contacting Twitch for user `{}`.",
+                        username
+                    ))
+                    .ephemeral(true);
+                command
+                    .create_response(&ctx.http, CreateInteractionResponse::Message(response))
+                    .await?;
+                return Err(e);
+            }
+        };
+
+        let guild_id = command.guild_id.expect("Command must be run in a guild.");
+
+        let reg = models::TwitchRegistration {
+            pk: format!("GUILD#{}", guild_id.get()),
+            sk: format!("TWITCH#{}", user.id),
+            gsi1pk: Some("TWITCH_LOOKUP".to_string()),
+            gsi1sk: Some(format!("LOGIN#{}", user.login.to_lowercase())),
+            discord_channel_id: target_channel_id,
+            twitch_user_id: user.id.clone(),
+            twitch_login: user.login.clone(),
+            access_token: "admin_reg_token".to_string(),
+            refresh_token: "admin_reg_refresh".to_string(),
+            item_type: "TWITCH_REG".to_string(),
+        };
+
+        models::save_twitch_registration(&app_state.db, reg).await?;
+
+        let webhook_register_url = dotenv!("WEBHOOK_REGISTER_URL");
+        let broadcaster_ids = vec![user.id.clone()];
+
+        if let Err(e) = app_state
+            .http
+            .post(webhook_register_url)
+            .json(&broadcaster_ids)
+            .send()
+            .await
+        {
+            println!(
+                "WARNING: Error calling webhook registration endpoint for {}: {}",
+                user.login, e
+            );
+        }
+
+        let response = CreateInteractionResponseMessage::new()
+            .content(format!(
+                "✅ Successfully registered Twitch user: `{}`. Updates will post to <#{}>.",
+                user.display_name, target_channel_id
+            ))
+            .ephemeral(true);
+        command
+            .create_response(&ctx.http, CreateInteractionResponse::Message(response))
+            .await?;
+    } else {
+        let base_url = dotenv!("BASE_URL");
+        let client_id = dotenv!("TWITCH_CLIENT_ID");
+
+        let guild_id = command.guild_id.expect("Command must be run in a guild.");
+        let state = format!("{}_{}", command.user.id.get(), guild_id.get());
+
+        let auth_url = format!(
+            "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri={}/auth/twitch/callback&response_type=code&scope=user:read:email&state={}&force_verify=true",
+            client_id,
+            base_url,
+            state
+        );
+
+        let response = CreateInteractionResponseMessage::new()
+            .content(format!(
+                "Please authorize with Twitch to register your channel:\n\n[Click here to authorize]({})",
+                auth_url
+            ))
+            .ephemeral(true);
+
+        command
+            .create_response(&ctx.http, CreateInteractionResponse::Message(response))
+            .await?;
+    }
+
     Ok(())
 }
 

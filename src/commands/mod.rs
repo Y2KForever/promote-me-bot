@@ -46,11 +46,18 @@ pub async fn register_commands(http: &Http) -> anyhow::Result<()> {
                     .required(true),
                 ),
             )
-            .add_option(CreateCommandOption::new(
-                CommandOptionType::SubCommand,
-                "twitch",
-                "Register your Twitch channel via OAuth",
-            ))
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::SubCommand,
+                    "twitch",
+                    "Register your Twitch channel via OAuth",
+                )
+                .add_sub_option(CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "username",
+                    "The Twitch username to register (Admin only)",
+                )),
+            )
             .add_option(CreateCommandOption::new(
                 CommandOptionType::SubCommand,
                 "tiktok",
